@@ -1,84 +1,58 @@
 name: Auto Update SSQ Data
 
 on:
-  # 定时：每周二、四、日晚上 22:30（北京时间，即 UTC 14:30）
-  # 双色球开奖时间 21:30，留 1 小时缓冲确保数据更新
+  # 定时触发：每周二、四、日晚 22:30（开奖后约30分钟）
   schedule:
-    - cron: '30 14 * * 2'  # 周二
-    - cron: '30 14 * * 4'  # 周四
-    - cron: '30 14 * * 0'  # 周日
-  # 允许手动触发
+    - cron: '30 14 * * 0,2,4'   # UTC 14:30 = 北京时间 22:30
+
+  # 支持手动触发
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  update-data:
+  update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - name: Checkout
+      - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: Fetch latest SSQ data
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 安装依赖
+        run: pip install requests
+
+      - name: 🕷️ 抓取开奖数据
+        run: python crawler.py
+
+      - name: 📊 检查数据文件
+        id: check
         run: |
-          # 从中国福彩官网获取最新 3 期双色球数据
-          RESPONSE=$(curl -sL \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Referer: https://www.cwl.gov.cn/" \
-            "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice?name=ssq&issueCount=3&issueStart=&issueEnd=&dayStart=&dayEnd=&pageNo=1&pageSize=3&week=&systemType=PC")
-
-          # 检查响应
-          if [ -z "$RESPONSE" ]; then
-            echo "❌ 获取数据失败：空响应"
-            exit 1
-          fi
-
-          # 用 node 解析 JSON 并生成 data.json
-          node -e "
-            const fs = require('fs');
-            const raw = JSON.parse(process.argv[1]);
-
-            if (!raw.result || raw.result.length < 3) {
-              console.error('❌ 数据不足 3 期');
-              process.exit(1);
-            }
-
-            const latest = raw.result.map(item => ({
-              period: item.code,
-              date: item.date.replace(/\(.*\)/, '').trim(),
-              red: item.red.split(',').map(Number),
-              blue: Number(item.blue)
-            }));
-
-            const output = {
-              latest,
-              updated: new Date().toISOString()
-            };
-
-            fs.writeFileSync('data.json', JSON.stringify(output, null, 2) + '\n');
-            console.log('✅ 数据已更新：');
-            latest.forEach(d => {
-              console.log('  ' + d.period + ' (' + d.date + ') 红:' + d.red.join(',') + ' 蓝:' + d.blue);
-            });
-          " "$RESPONSE"
-
-      - name: Check for changes
-        id: changes
-        run: |
-          if git diff --quiet data.json; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "ℹ️ 数据无变化"
+          if [ -f data.json ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "最新数据预览："
+            head -20 data.json
           else
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "✅ 数据已更新"
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ data.json 未生成"
           fi
 
-      - name: Commit and push
-        if: steps.changes.outputs.changed == 'true'
+      - name: 📝 提交更新
+        if: steps.check.outputs.exists == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data.json
-          git commit -m "🎱 自动更新双色球数据 $(date +%Y-%m-%d)"
+          # 只在有变更时提交
+          git diff --cached --quiet || git commit -m "🎱 自动更新开奖数据 $(date +'%Y-%m-%d %H:%M')"
           git push
+
+      - name: 🔔 失败通知
+        if: failure()
+        run: echo "⚠️ 数据更新失败，请检查日志"

@@ -28,7 +28,8 @@
 ssq-qilin/
 ├── index.html                              # 主页面
 ├── data.json                               # 开奖数据（自动更新）
-├── .github/workflows/update-data.yml       # 自动更新脚本
+├── crawler.py                              # 数据爬虫脚本
+├── .github/workflows/update-data.yml       # 自动更新工作流
 └── README.md                               # 说明文档
 ```
 
@@ -77,6 +78,23 @@ git push
 3. 点击 **Run workflow** → **Run workflow**
 4. 等待 1 分钟即可
 
+## 🕷️ 爬虫说明
+
+`crawler.py` 负责抓取开奖数据，采用多源策略：
+
+| 优先级 | 数据源 | 说明 |
+|--------|--------|------|
+| 1 | 中国福彩网 API | 官方接口，最可靠 |
+| 2 | 500.com | 备用方案 |
+
+**本地运行测试：**
+```bash
+pip install requests
+python crawler.py
+```
+
+运行后会在当前目录生成 `data.json`。
+
 ## 📝 数据格式
 
 `data.json` 格式如下：
@@ -84,11 +102,11 @@ git push
 ```json
 {
   "latest": [
+    {"period": "2026081", "date": "2026-07-16", "red": [6,10,12,15,24,27], "blue": 12},
     {"period": "2026080", "date": "2026-07-14", "red": [4,5,11,19,27,32], "blue": 1},
-    {"period": "2026079", "date": "2026-07-12", "red": [1,11,17,22,24,29], "blue": 4},
-    {"period": "2026078", "date": "2026-07-09", "red": [7,11,14,16,27,28], "blue": 6}
+    {"period": "2026079", "date": "2026-07-12", "red": [1,11,17,22,24,29], "blue": 4}
   ],
-  "updated": "2026-07-16T15:30:00+08:00"
+  "updated": "2026-07-19T18:51:46+08:00"
 }
 ```
 
