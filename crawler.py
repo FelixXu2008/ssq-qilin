@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-双色球开奖数据爬虫
-从中国福彩网抓取历史开奖数据，输出到 data.json
+双色球开奖数据爬虫（多源兼容版）
+支持国内外网络环境，GitHub Actions 可用
 """
 
 import json
@@ -14,162 +14,241 @@ from pathlib import Path
 try:
     import requests
 except ImportError:
-    print("正在安装 requests...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q"])
     import requests
 
-# ===== 配置 =====
-# 中国福彩网 API（JSON 接口，稳定可靠）
-CWL_API = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
-# 备用：500.com 开奖历史
-BACKUP_API = "https://datachart.500.com/ssq/history/newinc/history.php"
+DATA_FILE = Path(__file__).parent / "data.json"
+MAX_RETRIES = 2
+RETRY_DELAY = 2
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept": "*/*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Referer": "https://www.cwl.gov.cn/ygkj/wqkjgg/ssq/",
 }
 
-DATA_FILE = Path(__file__).parent / "data.json"
-MAX_RETRIES = 3
-RETRY_DELAY = 2  # 秒
 
-
+# ============================================================
+# 数据源 1：中国福彩网官方 API（国内网络优先）
+# ============================================================
 def fetch_from_cwl(limit=30):
-    """从中国福彩网官方 API 抓取"""
-    print(f"[福彩网] 正在抓取最近 {limit} 期数据...")
+    print(f"[源1-福彩网] 抓取最近 {limit} 期...")
+    url = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
     params = {
-        "name": "ssq",
-        "issueCount": limit,
-        "issueStart": "",
-        "issueEnd": "",
-        "dayStart": "",
-        "dayEnd": "",
-        "pageNo": 1,
-        "pageSize": limit,
-        "systemType": "PC",
+        "name": "ssq", "issueCount": limit,
+        "issueStart": "", "issueEnd": "",
+        "dayStart": "", "dayEnd": "",
+        "pageNo": 1, "pageSize": limit, "systemType": "PC",
     }
+    headers = {**HEADERS, "Referer": "https://www.cwl.gov.cn/ygkj/wqkjgg/ssq/"}
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(CWL_API, params=params, headers=HEADERS, timeout=15)
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            results = []
+            for item in data.get("result", []):
+                results.append({
+                    "period": item["code"],
+                    "date": item["date"][:10],
+                    "red": [int(x) for x in item["red"].split(",")],
+                    "blue": int(item["blue"]),
+                })
+            if results:
+                print(f"[源1-福彩网] ✅ 成功 {len(results)} 期")
+                return results
+        except Exception as e:
+            print(f"[源1-福彩网] 第{attempt}次失败: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+    return None
+
+
+# ============================================================
+# 数据源 2：500.com 图表数据（国内外均可访问）
+# ============================================================
+def fetch_from_500(limit=30):
+    print(f"[源2-500.com] 抓取最近 {limit} 期...")
+    url = "https://datachart.500.com/ssq/history/newinc/history.php"
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            html = resp.text
+
+            results = []
+            # 匹配表格行：<tr><td>期号</td><td>红1</td>...<td>红6</td><td>蓝</td></tr>
+            pattern = r'<tr[^>]*>\s*<td[^>]*>(\d{7})</td>(.*?)</tr>'
+            rows = re.findall(pattern, html, re.DOTALL)
+
+            for period, row_content in rows[:limit]:
+                nums = re.findall(r'>(\d+)<', row_content)
+                if len(nums) >= 7:
+                    results.append({
+                        "period": period,
+                        "date": "",
+                        "red": [int(x) for x in nums[:6]],
+                        "blue": int(nums[6]),
+                    })
+
+            if results:
+                print(f"[源2-500.com] ✅ 成功 {len(results)} 期")
+                return results
+        except Exception as e:
+            print(f"[源2-500.com] 第{attempt}次失败: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+    return None
+
+
+# ============================================================
+# 数据源 3：网易彩票 API（国内外均可）
+# ============================================================
+def fetch_from_163(limit=30):
+    print(f"[源3-网易彩票] 抓取最近 {limit} 期...")
+    url = "https://caipiao.163.com/award/getAwardInfo.html"
+    params = {"gameEn": "ssq", "periodNum": limit}
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
             results = []
-            for item in data.get("result", []):
-                # 解析红球和蓝球
-                red = [int(x) for x in item["red"].split(",")]
-                blue = int(item["blue"])
+            for item in data.get("data", {}).get("list", []):
+                period = item.get("period", "")
+                date_str = item.get("awardTime", "")[:10]
+                red_str = item.get("winningNumber", "")
+                # 网易格式: "01,05,11,19,27,32|04"
+                if "|" in red_str:
+                    red_part, blue_part = red_str.split("|")
+                    red = [int(x) for x in red_part.split(",")]
+                    blue = int(blue_part)
+                else:
+                    continue
                 results.append({
-                    "period": item["code"],           # 期号，如 "2026080"
-                    "date": item["date"][:10],        # 日期，如 "2026-07-14"
+                    "period": period,
+                    "date": date_str,
                     "red": red,
                     "blue": blue,
                 })
 
             if results:
-                print(f"[福彩网] 成功获取 {len(results)} 期数据")
+                print(f"[源3-网易彩票] ✅ 成功 {len(results)} 期")
                 return results
-
         except Exception as e:
-            print(f"[福彩网] 第 {attempt} 次尝试失败: {e}")
+            print(f"[源3-网易彩票] 第{attempt}次失败: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY)
-
     return None
 
 
-def fetch_from_500(limit=30):
-    """备用：从 500.com 抓取"""
-    print(f"[500.com] 正在抓取最近 {limit} 期数据...")
+# ============================================================
+# 数据源 4：新浪彩票 API（国内外均可）
+# ============================================================
+def fetch_from_sina(limit=30):
+    print(f"[源4-新浪彩票] 抓取最近 {limit} 期...")
+    url = "https://match.lottery.sina.com.cn/lotto/pc_zst/index"
+    params = {"type": "ssq"}
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(BACKUP_API, headers=HEADERS, timeout=15)
+            resp = requests.get(url, headers=HEADERS, timeout=10)
             resp.raise_for_status()
             html = resp.text
 
-            # 解析表格数据
-            # 格式: 期号 | 红球1-6 | 蓝球
-            pattern = r'<tr[^>]*>\s*<td>(\d{7})</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>\s*' \
-                      r'<td[^>]*>(\d+)</td>'
-
+            results = []
+            # 新浪走势图页面包含开奖数据
+            # 格式: data-period="2026081" data-red="06,10,12,15,24,27" data-blue="12"
+            pattern = r'data-period="(\d{7})"[^>]*data-red="([^"]+)"[^>]*data-blue="(\d+)"'
             matches = re.findall(pattern, html)
+
             if not matches:
-                # 尝试另一种格式
-                pattern = r'<tr>\s*<td>(\d{7})</td>(.*?)</tr>'
-                rows = re.findall(pattern, html, re.DOTALL)
-                results = []
-                for period, row_content in rows[:limit]:
-                    nums = re.findall(r'>(\d+)<', row_content)
-                    if len(nums) >= 7:
-                        red = [int(x) for x in nums[:6]]
-                        blue = int(nums[6])
-                        results.append({
-                            "period": period,
-                            "date": "",  # 500.com 部分格式没有日期
-                            "red": red,
-                            "blue": blue,
-                        })
-            else:
-                results = []
-                for m in matches[:limit]:
-                    period = m[0]
-                    red = [int(m[i]) for i in range(1, 7)]
-                    blue = int(m[7])
+                # 备用正则
+                pattern = r'"periodNo"\s*:\s*"(\d{7})".*?"redBall"\s*:\s*"([^"]+)".*?"blueBall"\s*:\s*"(\d+)"'
+                matches = re.findall(pattern, html, re.DOTALL)
+
+            for period, red_str, blue_str in matches[:limit]:
+                red = [int(x.strip()) for x in red_str.split(",") if x.strip().isdigit()]
+                if len(red) == 6:
                     results.append({
                         "period": period,
                         "date": "",
                         "red": red,
-                        "blue": blue,
+                        "blue": int(blue_str),
                     })
 
             if results:
-                print(f"[500.com] 成功获取 {len(results)} 期数据")
+                print(f"[源4-新浪彩票] ✅ 成功 {len(results)} 期")
                 return results
-
         except Exception as e:
-            print(f"[500.com] 第 {attempt} 次尝试失败: {e}")
+            print(f"[源4-新浪彩票] 第{attempt}次失败: {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY)
-
     return None
 
 
-def fetch_from_apijson(limit=30):
-    """备用方案2：公开 API"""
-    print(f"[API] 正在尝试公开数据接口...")
-
-    apis = [
-        {
-            "url": "https://api.jisuapi.com/caipiao/history",
-            "params": {"appkey": "", "caipiaoid": "14", "issueno": ""},
-            "note": "需要 appkey，跳过",
-            "skip": True,
-        },
-        {
-            "url": f"https://www.mxnzp.com/api/lottery/common/latest?code=ssq&app_id=&app_secret=",
-            "note": "需要 app_id，跳过",
-            "skip": True,
-        },
+# ============================================================
+# 数据源 5：GitHub 公开数据仓库（最稳定，全球可达）
+# ============================================================
+def fetch_from_github_repo(limit=30):
+    """从 GitHub 上的公开双色球数据仓库抓取"""
+    print(f"[源5-GitHub仓库] 抓取最近 {limit} 期...")
+    # 多个公开数据仓库，逐个尝试
+    repos = [
+        "https://raw.githubusercontent.com/nicecai/ssq-data/main/ssq.json",
+        "https://raw.githubusercontent.com/nicecai/ssq-data/main/data.json",
     ]
 
-    # 这些公开 API 大多需要注册，先跳过
+    for url in repos:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=10)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+
+                # 兼容不同格式
+                items = data if isinstance(data, list) else data.get("data", data.get("latest", []))
+                results = []
+                for item in items[:limit]:
+                    period = item.get("period") or item.get("issue") or item.get("code", "")
+                    red = item.get("red") or item.get("redBall", [])
+                    blue = item.get("blue") or item.get("blueBall", 0)
+                    date = item.get("date") or item.get("awardDate", "")
+
+                    if isinstance(red, str):
+                        red = [int(x) for x in red.split(",")]
+                    if isinstance(blue, str):
+                        blue = int(blue)
+
+                    if len(red) == 6 and blue > 0:
+                        results.append({
+                            "period": str(period),
+                            "date": str(date)[:10],
+                            "red": [int(x) for x in red],
+                            "blue": int(blue),
+                        })
+
+                if results:
+                    print(f"[源5-GitHub仓库] ✅ 成功 {len(results)} 期")
+                    return results
+            except Exception as e:
+                print(f"[源5-GitHub仓库] {url} 第{attempt}次失败: {e}")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
     return None
 
 
+# ============================================================
+# 主流程
+# ============================================================
 def load_existing_data():
-    """加载已有数据"""
     if DATA_FILE.exists():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -179,82 +258,63 @@ def load_existing_data():
     return None
 
 
-def merge_data(existing, fresh):
-    """合并新旧数据，去重"""
-    if not existing or not fresh:
-        return fresh
-
-    existing_periods = {item["period"] for item in existing.get("latest", [])}
-    merged = list(existing.get("latest", []))
-
-    for item in fresh:
-        if item["period"] not in existing_periods:
-            merged.append(item)
-
-    # 按期号倒序排列（最新在前）
-    merged.sort(key=lambda x: x["period"], reverse=True)
-    return merged
-
-
 def save_data(results):
-    """保存到 data.json"""
     now = datetime.now(timezone(timedelta(hours=8))).isoformat()
-
-    # 确保按期号倒序
     results.sort(key=lambda x: x["period"], reverse=True)
 
-    output = {
-        "latest": results,
-        "updated": now,
-    }
-
+    output = {"latest": results, "updated": now}
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"\n✅ 数据已保存到 {DATA_FILE}")
-    print(f"   最新一期: 第 {results[0]['period']} 期 ({results[0].get('date', '未知日期')})")
+    print(f"\n{'='*50}")
+    print(f"✅ 数据已保存 → {DATA_FILE.name}")
+    print(f"   最新: 第{results[0]['period']}期 ({results[0].get('date', 'N/A')})")
     print(f"   红球: {results[0]['red']}  蓝球: {results[0]['blue']}")
-    print(f"   共 {len(results)} 期数据")
-    print(f"   更新时间: {now}")
+    print(f"   共 {len(results)} 期 | 更新: {now}")
+    print(f"{'='*50}")
 
 
 def main():
     print("=" * 50)
-    print("🎱 双色球开奖数据爬虫")
+    print("🎱 双色球开奖数据爬虫 (多源版)")
     print("=" * 50)
     print()
 
-    # 优先从官方 API 抓取
-    results = fetch_from_cwl(limit=30)
+    # 按优先级逐个尝试数据源
+    sources = [
+        ("福彩网",    fetch_from_cwl),       # 国内优先
+        ("500.com",   fetch_from_500),        # 国内外均可
+        ("网易彩票",  fetch_from_163),        # 国内外均可
+        ("新浪彩票",  fetch_from_sina),       # 国内外均可
+        ("GitHub仓库", fetch_from_github_repo), # 全球可达
+    ]
 
-    # 官方接口失败，尝试备用
-    if not results:
-        print("\n⚠️  官方接口失败，尝试备用方案...")
-        results = fetch_from_500(limit=30)
+    results = None
+    for name, fetcher in sources:
+        results = fetcher(limit=30)
+        if results:
+            break
+        print(f"   ↳ {name} 失败，尝试下一个源...\n")
 
-    # 所有来源都失败
     if not results:
-        print("\n❌ 所有数据源均抓取失败！")
-        # 如果有旧数据，保留不覆盖
+        print("\n❌ 所有数据源均失败！")
         existing = load_existing_data()
         if existing:
-            print("📦 保留已有数据，未覆盖")
+            print("📦 保留已有数据不覆盖")
             sys.exit(0)
         else:
             print("💥 无任何可用数据")
             sys.exit(1)
 
-    # 合并已有数据（保留历史）
+    # 合并历史数据
     existing = load_existing_data()
     if existing:
-        existing_latest = existing.get("latest", [])
-        existing_periods = {item["period"] for item in existing_latest}
-        # 把新数据中有但旧数据中没有的加进去
+        existing_periods = {item["period"] for item in existing.get("latest", [])}
         for item in results:
             if item["period"] not in existing_periods:
-                existing_latest.append(item)
-        existing_latest.sort(key=lambda x: x["period"], reverse=True)
-        results = existing_latest
+                existing["latest"].append(item)
+        existing["latest"].sort(key=lambda x: x["period"], reverse=True)
+        results = existing["latest"]
 
     save_data(results)
 
