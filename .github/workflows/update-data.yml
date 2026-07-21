@@ -1,0 +1,76 @@
+name: Auto Update SSQ Data
+
+on:
+  schedule:
+    - cron: '30 14 * * 0,2,4'   # UTC 14:30 = 北京时间 23:00（周二四日）
+  workflow_dispatch:              # 支持手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 安装依赖
+        run: pip install requests
+
+      - name: 🕷️ 抓取开奖数据
+        run: |
+          echo "=== 开始抓取 ==="
+          echo "运行环境: $(uname -a)"
+          echo "Python版本: $(python3 --version)"
+          echo ""
+          python3 crawler.py
+          echo ""
+          echo "=== 抓取完成 ==="
+
+      - name: 📊 验证数据
+        id: check
+        run: |
+          if [ ! -f data.json ]; then
+            echo "❌ data.json 不存在！"
+            exit 1
+          fi
+
+          echo "=== data.json 内容 ==="
+          cat data.json
+          echo ""
+
+          # 检查是否是有效的 JSON
+          python3 -c "
+          import json
+          with open('data.json') as f:
+              d = json.load(f)
+          count = len(d.get('latest', []))
+          print(f'数据条数: {count}')
+          if count == 0:
+              print('❌ 数据为空！')
+              exit(1)
+          print(f'最新一期: {d[\"latest\"][0][\"period\"]}')
+          "
+
+      - name: 📝 提交更新
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          # 只在有实际变更时提交
+          if git diff --cached --quiet; then
+            echo "📌 数据无变化，跳过提交"
+          else
+            git commit -m "🎱 自动更新开奖数据 $(date +'%Y-%m-%d %H:%M')"
+            git push
+            echo "✅ 已推送到 GitHub"
+          fi
